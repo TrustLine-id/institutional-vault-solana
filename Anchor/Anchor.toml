@@ -10,12 +10,14 @@ svs_1 = "53ep1eySSfnNqUPV54GNeRSSPpieeDZUr3ktUwtg9HmK"
 svs_2 = "6yLjERH2JH1doZAR7rx8zzERzgxor3tCZtNx29ZofdPA"
 svs_3 = "BVFDzefKfNjGje4M5hadx6k7B9oYinxSuLAt6qWjfJ8U"
 svs_4 = "AJ4vav8GMmYBCVtUzPgswAdBLuhq4Ns1cJ4AtjC47UNS"
+svs_13 = "11111111111111111111111111111111"
 
 [programs.localnet]
 svs_1 = "Bv8aVSQ3DJUe3B7TqQZRZgrNvVTh8TjfpwpoeR1ckDMC"
 svs_2 = "3UrYrxh1HmVgq7WPygZ5x1gNEaWFwqTMs7geNqMnsrtD"
 svs_3 = "EcpnYtaCBrZ4p4uq7dDr55D3fL9nsxbCNqpyUREGpPkh"
 svs_4 = "2WP7LXWqrp1W4CwEJuVt2SxWPNY2n6AYmijh6Z4EeidY"
+svs_13 = "11111111111111111111111111111111"
 
 [registry]
 url = "https://api.apr.dev"
