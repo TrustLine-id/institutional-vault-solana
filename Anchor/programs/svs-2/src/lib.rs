@@ -15,7 +15,7 @@ pub mod state;
 
 use instructions::*;
 
-declare_id!("3UrYrxh1HmVgq7WPygZ5x1gNEaWFwqTMs7geNqMnsrtD");
+declare_id!("6yLjERH2JH1doZAR7rx8zzERzgxor3tCZtNx29ZofdPA");
 
 #[program]
 pub mod svs_2 {
