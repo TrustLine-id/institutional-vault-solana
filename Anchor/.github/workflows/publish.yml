@@ -1,0 +1,46 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          registry-url: 'https://registry.npmjs.org'
+          cache: 'yarn'
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Build SDK
+        working-directory: sdk/core
+        run: yarn build
+
+      - name: Run tests
+        working-directory: sdk/core
+        run: |
+          NODE_MAJOR=$(node -v | cut -d. -f1 | tr -d 'v')
+          if [ "$NODE_MAJOR" -ge 22 ]; then
+            node --no-experimental-strip-types ./node_modules/.bin/mocha -r ts-node/register --timeout 10000 --exit 'tests/**/*.ts'
+          else
+            yarn test
+          fi
+
+      - name: Publish to npm
+        working-directory: sdk/core
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
