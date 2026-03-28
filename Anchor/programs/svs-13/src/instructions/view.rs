@@ -30,6 +30,11 @@ pub struct VaultViewWithOwner<'info> {
         constraint = owner_shares_account.mint == vault.shares_mint,
     )]
     pub owner_shares_account: InterfaceAccount<'info, TokenAccount>,
+
+    #[account(
+        constraint = asset_vault.key() == vault.asset_vault,
+    )]
+    pub asset_vault: InterfaceAccount<'info, TokenAccount>,
 }
 
 /// Preview how many shares would be minted for given assets (floor rounding)
@@ -183,7 +188,9 @@ pub fn max_withdraw(ctx: Context<VaultViewWithOwner>) -> Result<()> {
     )?;
 
     // Cap at vault's total assets
-    let max = max_assets.min(vault.total_assets);
+    // Withdrawable assets are limited by idle liquidity (asset_vault balance).
+    let idle_assets = ctx.accounts.asset_vault.amount;
+    let max = max_assets.min(idle_assets);
     set_return_data(&max.to_le_bytes());
     Ok(())
 }

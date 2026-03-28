@@ -1,0 +1,22 @@
+[package]
+name = "svs-13-adapter-mock"
+version = "0.1.0"
+description = "SVS-13 adapter mock for CPI valuation testing"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "svs_13_adapter_mock"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+
+[dependencies]
+anchor-lang = { version = "0.31.1" }
+

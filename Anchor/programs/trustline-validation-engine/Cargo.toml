@@ -1,0 +1,21 @@
+[package]
+name = "trustline-validation-engine"
+version = "0.1.0"
+description = "Trustline validation engine for Solana protected programs"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "trustline_validation_engine"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+
+[dependencies]
+anchor-lang = "0.31.1"

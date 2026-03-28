@@ -1,18 +1,26 @@
 //! Mint instruction: mint exact shares by depositing required assets (stored balance model).
 
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program_pack::Pack;
+use anchor_lang::solana_program::{
+    hash::hash as solana_hash,
+    instruction::{AccountMeta, Instruction},
+    program::invoke,
+};
 use anchor_spl::{
-    associated_token::AssociatedToken,
+    associated_token::{self, AssociatedToken},
     token_2022::{self, MintTo, Token2022},
     token_interface::{transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked},
 };
+use spl_token_2022::state::Account as SplTokenAccount;
 
 use crate::{
     constants::VAULT_SEED,
     error::VaultError,
     events::Deposit as DepositEvent,
     math::{convert_to_assets, Rounding},
-    state::Vault,
+    state::{AdapterConfig, Vault},
+    trustline::{require_trustline, split_trustline_remaining_accounts},
 };
 
 #[cfg(feature = "modules")]
@@ -53,26 +61,67 @@ pub struct MintShares<'info> {
     )]
     pub shares_mint: InterfaceAccount<'info, Mint>,
 
-    #[account(
-        init_if_needed,
-        payer = user,
-        associated_token::mint = shares_mint,
-        associated_token::authority = user,
-        associated_token::token_program = token_2022_program,
-    )]
-    pub user_shares_account: InterfaceAccount<'info, TokenAccount>,
+    // Token-2022 shares account (created idempotently by this instruction).
+    // We keep it as untyped `AccountInfo` to avoid Anchor stack-heavy `init_if_needed` constraints.
+    /// CHECK: We validate the passed account address in the handler (must equal the user's ATA for `shares_mint`).
+    /// Anchor types are intentionally avoided here to reduce BPF stack usage.
+    #[account(mut)]
+    pub user_shares_account: AccountInfo<'info>,
 
     pub asset_token_program: Interface<'info, TokenInterface>,
     pub token_2022_program: Program<'info, Token2022>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
+
+    /// CHECK: Optional; validated/used only when `vault.liquidity_adapter_id` is set (deserialized in handler).
+    /// Optional liquidity adapter config (only used when vault.liquidity_adapter_id is set)
+    pub liquidity_adapter_config: Option<AccountInfo<'info>>,
+
+    /// CHECK: Optional; validated/updated only when `vault.liquidity_adapter_id` is set (byte-level field update in handler).
+    /// Optional liquidity adapter position (only used when vault.liquidity_adapter_id is set)
+    #[account(mut)]
+    pub liquidity_adapter_position: Option<AccountInfo<'info>>,
+
+    /// CHECK: Optional; validated in handler by unpacking SPL Token-2022 `Account` state (owner/mint checks).
+    /// Optional liquidity adapter holding token account (only used when vault.liquidity_adapter_id is set)
+    #[account(mut)]
+    pub liquidity_adapter_holding: Option<AccountInfo<'info>>,
+
+    /// CHECK: Optional executable adapter program account (only used when vault.liquidity_adapter_id is set).
+    pub liquidity_adapter_program: Option<AccountInfo<'info>>,
 }
 
 /// Mint exact shares, paying required assets (ceiling rounding - protects vault)
 ///
 /// IMPORTANT: Both deposit() and mint() enforce caps to prevent bypass.
-pub fn handler(ctx: Context<MintShares>, shares: u64, max_assets_in: u64) -> Result<()> {
+pub fn handler<'info>(
+    ctx: Context<'_, '_, '_, 'info, MintShares<'info>>,
+    shares: u64,
+    max_assets_in: u64,
+) -> Result<()> {
     require!(shares > 0, VaultError::ZeroAmount);
+    let (_remaining_accounts, trustline_accounts) = split_trustline_remaining_accounts(
+        ctx.remaining_accounts,
+        ctx.accounts.vault.trustline_enabled,
+    )?;
+
+    let asset_mint_key = ctx.accounts.vault.asset_mint;
+    let vault_id_bytes = ctx.accounts.vault.vault_id.to_le_bytes();
+    let bump = ctx.accounts.vault.bump;
+    let signer_seeds: &[&[&[u8]]] = &[&[
+        VAULT_SEED,
+        asset_mint_key.as_ref(),
+        vault_id_bytes.as_ref(),
+        &[bump],
+    ]];
+    require_trustline(
+        &ctx.accounts.vault.to_account_info(),
+        ctx.accounts.vault.trustline_enabled,
+        ctx.accounts.vault.validation_engine,
+        &ctx.accounts.user.to_account_info(),
+        &trustline_accounts,
+        signer_seeds,
+    )?;
 
     let vault = &ctx.accounts.vault;
     let total_shares = ctx.accounts.shares_mint.supply;
@@ -91,7 +140,7 @@ pub fn handler(ctx: Context<MintShares>, shares: u64, max_assets_in: u64) -> Res
     // ===== Module Hooks (if enabled) =====
     #[cfg(feature = "modules")]
     let net_shares = {
-        let remaining = ctx.remaining_accounts;
+        let remaining = &_remaining_accounts;
         let vault_key = vault.key();
         let user_key = ctx.accounts.user.key();
 
@@ -119,25 +168,189 @@ pub fn handler(ctx: Context<MintShares>, shares: u64, max_assets_in: u64) -> Res
     // Slippage check
     require!(assets <= max_assets_in, VaultError::SlippageExceeded);
 
-    // Transfer assets from user to vault
-    transfer_checked(
-        CpiContext::new(
-            ctx.accounts.asset_token_program.to_account_info(),
-            TransferChecked {
-                from: ctx.accounts.user_asset_account.to_account_info(),
-                to: ctx.accounts.asset_vault.to_account_info(),
-                mint: ctx.accounts.asset_mint.to_account_info(),
-                authority: ctx.accounts.user.to_account_info(),
-            },
-        ),
-        assets,
-        ctx.accounts.asset_mint.decimals,
-    )?;
+    // Transfer assets from user either to idle (asset_vault) or directly into the liquidity adapter holding.
+    if let Some(liquidity_id) = ctx.accounts.vault.liquidity_adapter_id {
+        let cfg_info = ctx
+            .accounts
+            .liquidity_adapter_config
+            .as_ref()
+            .ok_or(VaultError::LiquidityAdapterMismatch)?;
+        let pos_info = ctx
+            .accounts
+            .liquidity_adapter_position
+            .as_ref()
+            .ok_or(VaultError::LiquidityAdapterMismatch)?;
+        let holding = ctx
+            .accounts
+            .liquidity_adapter_holding
+            .as_ref()
+            .ok_or(VaultError::LiquidityAdapterMismatch)?;
+        let adapter_program = ctx
+            .accounts
+            .liquidity_adapter_program
+            .as_ref()
+            .ok_or(VaultError::LiquidityAdapterMismatch)?;
+
+        let cfg_data = cfg_info.try_borrow_data()?;
+        let cfg: AdapterConfig = AnchorDeserialize::deserialize(&mut &cfg_data[8..])?;
+        require!(
+            cfg.adapter_id == liquidity_id,
+            VaultError::LiquidityAdapterMismatch
+        );
+        require!(cfg.enabled, VaultError::AdapterDisabled);
+        require!(
+            cfg.vault == ctx.accounts.vault.key(),
+            VaultError::LiquidityAdapterMismatch
+        );
+        require!(
+            cfg.holding_account == *holding.key,
+            VaultError::AdapterHoldingMismatch
+        );
+        require!(
+            cfg.adapter_program == *adapter_program.key,
+            VaultError::LiquidityAdapterMismatch
+        );
+        require!(
+            adapter_program.executable,
+            VaultError::LiquidityAdapterMismatch
+        );
+        drop(cfg_data);
+
+        // Validate adapter holding token account (kept untyped to reduce Anchor
+        // `try_accounts()` stack usage; checks are done here).
+        let holding_data = holding.try_borrow_data()?;
+        let holding_state = SplTokenAccount::unpack(&holding_data)
+            .map_err(|_| VaultError::LiquidityAdapterMismatch)?;
+        require!(
+            holding_state.owner == ctx.accounts.vault.key(),
+            VaultError::LiquidityAdapterMismatch
+        );
+        require!(
+            holding_state.mint == ctx.accounts.vault.asset_mint,
+            VaultError::LiquidityAdapterMismatch
+        );
+        drop(holding_data);
+
+        transfer_checked(
+            CpiContext::new(
+                ctx.accounts.asset_token_program.to_account_info(),
+                TransferChecked {
+                    from: ctx.accounts.user_asset_account.to_account_info(),
+                    to: holding.clone(),
+                    mint: ctx.accounts.asset_mint.to_account_info(),
+                    authority: ctx.accounts.user.to_account_info(),
+                },
+            ),
+            assets,
+            ctx.accounts.asset_mint.decimals,
+        )?;
+
+        // Treat deposited funds as immediately deployed to the liquidity adapter.
+        {
+            let mut pos_data = pos_info.try_borrow_mut_data()?;
+            require!(
+                pos_data.len() >= 8 + 32 + 8 + 8,
+                VaultError::AdapterPositionNotFound
+            );
+
+            // Verify PDA fields we care about.
+            let pos_vault_bytes = &pos_data[8..40];
+            require!(
+                pos_vault_bytes == ctx.accounts.vault.key().as_ref(),
+                VaultError::LiquidityAdapterMismatch
+            );
+
+            let mut adapter_id_bytes = [0u8; 8];
+            adapter_id_bytes.copy_from_slice(&pos_data[40..48]);
+            let pos_adapter_id = u64::from_le_bytes(adapter_id_bytes);
+            require!(
+                pos_adapter_id == liquidity_id,
+                VaultError::LiquidityAdapterMismatch
+            );
+
+            let mut principal_bytes = [0u8; 8];
+            principal_bytes.copy_from_slice(&pos_data[48..56]);
+            let principal_deployed = u64::from_le_bytes(principal_bytes);
+
+            let new_principal = principal_deployed
+                .checked_add(assets)
+                .ok_or(VaultError::MathOverflow)?;
+            pos_data[48..56].copy_from_slice(&new_principal.to_le_bytes());
+            drop(pos_data);
+        }
+
+        // Optional phase-4 liquidity adapter behavior:
+        // Immediately CPI `allocate` with data=[] after routing the deposit.
+        let allocate_discriminator = {
+            let hash = solana_hash(b"global:allocate");
+            let bytes = hash.to_bytes();
+            let mut out = [0u8; 8];
+            out.copy_from_slice(&bytes[..8]);
+            out
+        };
+
+        let mut ix_data: Vec<u8> = Vec::with_capacity(8 + 8 + 4);
+        ix_data.extend_from_slice(&allocate_discriminator);
+        ix_data.extend_from_slice(&assets.to_le_bytes());
+        ix_data.extend_from_slice(&0u32.to_le_bytes());
+
+        let ix = Instruction {
+            program_id: cfg.adapter_program,
+            accounts: vec![
+                AccountMeta::new_readonly(cfg_info.key(), false),
+                AccountMeta::new_readonly(pos_info.key(), false),
+                AccountMeta::new(holding.key(), false),
+            ],
+            data: ix_data,
+        };
+
+        let cpi_accounts = [
+            cfg_info.clone(),
+            pos_info.clone(),
+            holding.clone(),
+            adapter_program.clone(),
+        ];
+        invoke(&ix, &cpi_accounts).map_err(|_| VaultError::AdapterCpiFailed)?;
+    } else {
+        // Default path: transfer to idle liquidity.
+        transfer_checked(
+            CpiContext::new(
+                ctx.accounts.asset_token_program.to_account_info(),
+                TransferChecked {
+                    from: ctx.accounts.user_asset_account.to_account_info(),
+                    to: ctx.accounts.asset_vault.to_account_info(),
+                    mint: ctx.accounts.asset_mint.to_account_info(),
+                    authority: ctx.accounts.user.to_account_info(),
+                },
+            ),
+            assets,
+            ctx.accounts.asset_mint.decimals,
+        )?;
+    }
+
+    // Ensure the user's shares ATA exists (idempotent create, then mint).
+    let expected_user_shares_ata = associated_token::get_associated_token_address_with_program_id(
+        &ctx.accounts.user.key(),
+        &ctx.accounts.shares_mint.key(),
+        &ctx.accounts.token_2022_program.key(),
+    );
+    require!(
+        ctx.accounts.user_shares_account.key() == expected_user_shares_ata,
+        VaultError::InvalidSharesAccount
+    );
+    associated_token::create_idempotent(CpiContext::new(
+        ctx.accounts.associated_token_program.to_account_info(),
+        anchor_spl::associated_token::Create {
+            payer: ctx.accounts.user.to_account_info(),
+            associated_token: ctx.accounts.user_shares_account.clone(),
+            authority: ctx.accounts.user.to_account_info(),
+            mint: ctx.accounts.shares_mint.to_account_info(),
+            system_program: ctx.accounts.system_program.to_account_info(),
+            token_program: ctx.accounts.token_2022_program.to_account_info(),
+        },
+    ))?;
 
     // Mint exact shares to user
-    let asset_mint_key = ctx.accounts.vault.asset_mint;
-    let vault_id_bytes = ctx.accounts.vault.vault_id.to_le_bytes();
-    let bump = ctx.accounts.vault.bump;
     let signer_seeds: &[&[&[u8]]] = &[&[
         VAULT_SEED,
         asset_mint_key.as_ref(),

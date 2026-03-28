@@ -8,6 +8,10 @@ use crate::constants::VAULT_SEED;
 pub struct Vault {
     /// Vault admin who can pause/unpause and transfer authority
     pub authority: Pubkey,
+    /// Curator role (risk manager) - updates NAV via sync_total_assets
+    pub curator: Pubkey,
+    /// Allocator role (execution) - allocates/deallocates adapter positions
+    pub allocator: Pubkey,
     /// Underlying asset mint
     pub asset_mint: Pubkey,
     /// LP token mint (shares)
@@ -24,13 +28,30 @@ pub struct Vault {
     pub paused: bool,
     /// Unique vault identifier (allows multiple vaults per asset)
     pub vault_id: u64,
+
+    /// Liquidity adapter id (0 = none; adapter id must be non-zero)
+    pub liquidity_adapter_id: Option<u64>,
+
+    /// Max number of adapters configured for this vault
+    pub max_adapters: u8,
+    /// Current number of adapters
+    pub num_adapters: u8,
+    /// Last adapter NAV sync slot
+    pub last_sync_slot: u64,
+    /// Trustline validation engine program allowed to protect this vault
+    pub validation_engine: Pubkey,
+    /// Whether Trustline enforcement is active for protected instructions
+    pub trustline_enabled: bool,
+
     /// Reserved for future upgrades
-    pub _reserved: [u8; 64],
+    pub _reserved: [u8; 31],
 }
 
 impl Vault {
     pub const LEN: usize = 8 +  // discriminator
         32 +  // authority
+        32 +  // curator
+        32 +  // allocator
         32 +  // asset_mint
         32 +  // shares_mint
         32 +  // asset_vault
@@ -39,9 +60,67 @@ impl Vault {
         1 +   // bump
         1 +   // paused
         8 +   // vault_id
-        64; // _reserved
+        9 +   // liquidity_adapter_id: Option<u64> (1 tag + u64)
+        1 +   // max_adapters
+        1 +   // num_adapters
+        8 +   // last_sync_slot
+        32 +  // validation_engine
+        1 +   // trustline_enabled
+        31; // _reserved
 
     pub const SEED_PREFIX: &'static [u8] = VAULT_SEED;
+}
+
+// =============================================================================
+// Adapter Registry Accounts
+// =============================================================================
+
+#[account]
+pub struct AdapterConfig {
+    pub vault: Pubkey,
+    pub adapter_id: u64,
+    pub adapter_program: Pubkey,
+    pub enabled: bool,
+    pub max_allocation_abs: u64, // 0 = no cap
+    pub holding_account: Pubkey,
+    pub name: [u8; 32],
+    pub bump: u8,
+    pub _reserved: [u8; 32],
+}
+
+impl AdapterConfig {
+    pub const LEN: usize = 8 +   // discriminator
+        32 +  // vault
+        8 +   // adapter_id
+        32 +  // adapter_program
+        1 +   // enabled
+        8 +   // max_allocation_abs
+        32 +  // holding_account
+        32 +  // name
+        1 +   // bump
+        32; // _reserved
+}
+
+#[account]
+pub struct AdapterPosition {
+    pub vault: Pubkey,
+    pub adapter_id: u64,
+    pub principal_deployed: u64,
+    pub last_reported_assets: u64,
+    pub last_reported_slot: u64,
+    pub bump: u8,
+    pub _reserved: [u8; 32],
+}
+
+impl AdapterPosition {
+    pub const LEN: usize = 8 +   // discriminator
+        32 +  // vault
+        8 +   // adapter_id
+        8 +   // principal_deployed
+        8 +   // last_reported_assets
+        8 +   // last_reported_slot
+        1 +   // bump
+        32; // _reserved
 }
 
 // =============================================================================

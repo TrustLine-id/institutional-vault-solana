@@ -46,4 +46,73 @@ pub enum VaultError {
 
     #[msg("Lock duration exceeds maximum")]
     LockDurationExceedsMax,
+
+    // =========================
+    // SVS-13 Adapter errors
+    // =========================
+    #[msg("Unauthorized - caller is not curator")]
+    NotCurator,
+
+    #[msg("Unauthorized - caller is not allocator")]
+    NotAllocator,
+
+    #[msg("Adapter not enabled")]
+    AdapterDisabled,
+
+    #[msg("Adapter config not found")]
+    AdapterConfigNotFound,
+
+    #[msg("Adapter position not found")]
+    AdapterPositionNotFound,
+
+    #[msg("Adapter cap exceeded")]
+    AdapterCapExceeded,
+
+    #[msg("Liquidity adapter mismatch")]
+    LiquidityAdapterMismatch,
+
+    #[msg("Adapter holding account mismatch")]
+    AdapterHoldingMismatch,
+
+    #[msg("Adapter has deployed principal; cannot remove")]
+    AdapterHasPosition,
+
+    #[msg("Maximum number of adapters exceeded")]
+    MaxAdaptersExceeded,
+
+    #[msg("Invalid adapter id")]
+    InvalidAdapterId,
+
+    #[msg("Invalid shares token account")]
+    InvalidSharesAccount,
+
+    #[msg("Adapter CPI failed")]
+    AdapterCpiFailed,
+
+    #[msg("Missing adapter return data")]
+    AdapterReturnDataMissing,
+
+    #[msg("Adapter return data length is invalid")]
+    AdapterReturnDataInvalidLength,
+
+    #[msg("Adapter returned data for the wrong program")]
+    AdapterReturnDataWrongProgram,
+
+    #[msg("Adapter deallocate return amount mismatch")]
+    AdapterDeallocateReturnMismatch,
+
+    #[msg("Trustline account mismatch")]
+    TrustlineAccountMismatch,
+
+    #[msg("Trustline configuration missing")]
+    TrustlineConfigMissing,
+
+    #[msg("Trustline engine id mismatch")]
+    TrustlineEngineMismatch,
+
+    #[msg("Trustline instruction fingerprint mismatch")]
+    TrustlineInstructionMismatch,
+
+    #[msg("Trustline validation failed")]
+    TrustlineValidationFailed,
 }

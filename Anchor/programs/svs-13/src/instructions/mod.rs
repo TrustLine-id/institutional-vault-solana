@@ -1,6 +1,8 @@
 //! Vault instruction handlers: deposit, mint, withdraw, redeem, admin, sync.
 
+pub mod adapter_admin;
 pub mod admin;
+pub mod allocator;
 pub mod deposit;
 pub mod initialize;
 pub mod mint;
@@ -12,7 +14,11 @@ pub mod withdraw;
 pub mod module_admin;
 
 #[allow(ambiguous_glob_reexports)]
+pub use adapter_admin::*;
+#[allow(ambiguous_glob_reexports)]
 pub use admin::*;
+#[allow(ambiguous_glob_reexports)]
+pub use allocator::*;
 #[allow(ambiguous_glob_reexports)]
 pub use deposit::*;
 #[allow(ambiguous_glob_reexports)]

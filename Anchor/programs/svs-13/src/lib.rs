@@ -12,11 +12,12 @@ pub mod events;
 pub mod instructions;
 pub mod math;
 pub mod state;
+pub mod trustline;
 
 use instructions::*;
 
 // Temporary placeholder program id (will be replaced when SVS-13 is deployed)
-declare_id!("11111111111111111111111111111111");
+declare_id!("5jZj4Xh36vgk2SYDXXaqMJWwZCn3v9n7kHziPwyrRGDk");
 
 #[program]
 pub mod svs_13 {
@@ -35,46 +36,148 @@ pub mod svs_13 {
 
     /// Deposit assets and receive shares
     /// Returns shares minted (floor rounding - favors vault)
-    pub fn deposit(ctx: Context<Deposit>, assets: u64, min_shares_out: u64) -> Result<()> {
+    pub fn deposit<'info>(
+        ctx: Context<'_, '_, '_, 'info, Deposit<'info>>,
+        assets: u64,
+        min_shares_out: u64,
+    ) -> Result<()> {
         instructions::deposit::handler(ctx, assets, min_shares_out)
     }
 
     /// Mint exact shares by depositing required assets
     /// Pays assets (ceiling rounding - favors vault)
-    pub fn mint(ctx: Context<MintShares>, shares: u64, max_assets_in: u64) -> Result<()> {
+    pub fn mint<'info>(
+        ctx: Context<'_, '_, '_, 'info, MintShares<'info>>,
+        shares: u64,
+        max_assets_in: u64,
+    ) -> Result<()> {
         instructions::mint::handler(ctx, shares, max_assets_in)
     }
 
     /// Withdraw exact assets by burning required shares
     /// Burns shares (ceiling rounding - favors vault)
-    pub fn withdraw(ctx: Context<Withdraw>, assets: u64, max_shares_in: u64) -> Result<()> {
+    pub fn withdraw<'info>(
+        ctx: Context<'_, '_, '_, 'info, Withdraw<'info>>,
+        assets: u64,
+        max_shares_in: u64,
+    ) -> Result<()> {
         instructions::withdraw::handler(ctx, assets, max_shares_in)
     }
 
     /// Redeem shares for assets
     /// Receives assets (floor rounding - favors vault)
-    pub fn redeem(ctx: Context<Redeem>, shares: u64, min_assets_out: u64) -> Result<()> {
+    pub fn redeem<'info>(
+        ctx: Context<'_, '_, '_, 'info, Redeem<'info>>,
+        shares: u64,
+        min_assets_out: u64,
+    ) -> Result<()> {
         instructions::redeem::handler(ctx, shares, min_assets_out)
     }
 
     /// Pause all vault operations (emergency)
-    pub fn pause(ctx: Context<Admin>) -> Result<()> {
+    pub fn pause<'info>(ctx: Context<'_, '_, '_, 'info, Admin<'info>>) -> Result<()> {
         instructions::admin::pause(ctx)
     }
 
     /// Unpause vault operations
-    pub fn unpause(ctx: Context<Admin>) -> Result<()> {
+    pub fn unpause<'info>(ctx: Context<'_, '_, '_, 'info, Admin<'info>>) -> Result<()> {
         instructions::admin::unpause(ctx)
     }
 
     /// Transfer vault authority
-    pub fn transfer_authority(ctx: Context<Admin>, new_authority: Pubkey) -> Result<()> {
+    pub fn transfer_authority<'info>(
+        ctx: Context<'_, '_, '_, 'info, Admin<'info>>,
+        new_authority: Pubkey,
+    ) -> Result<()> {
         instructions::admin::transfer_authority(ctx, new_authority)
     }
 
-    /// Sync total_assets with actual vault balance
-    pub fn sync(ctx: Context<Sync>) -> Result<()> {
-        instructions::admin::sync(ctx)
+    /// Configure whether this vault enforces Trustline validations.
+    pub fn set_trustline_config(
+        ctx: Context<Admin>,
+        validation_engine: Pubkey,
+        enabled: bool,
+    ) -> Result<()> {
+        instructions::admin::set_trustline_config(ctx, validation_engine, enabled)
+    }
+
+    /// Sync total_assets (NAV) using adapters and cached idle.
+    pub fn sync_total_assets(ctx: Context<SyncTotalAssets>, adapter_ids: Vec<u64>) -> Result<()> {
+        instructions::admin::sync_total_assets(ctx, adapter_ids)
+    }
+
+    // ============ Adapter Admin (curator/authority) ============
+
+    /// Add and register a new adapter.
+    pub fn add_adapter(
+        ctx: Context<AddAdapter>,
+        adapter_id: u64,
+        adapter_program: Pubkey,
+        max_allocation_abs: u64,
+    ) -> Result<()> {
+        instructions::adapter_admin::add_adapter(
+            ctx,
+            adapter_id,
+            adapter_program,
+            max_allocation_abs,
+        )
+    }
+
+    /// Remove/disable an adapter (only when fully deallocated).
+    pub fn remove_adapter(ctx: Context<RemoveAdapter>, adapter_id: u64) -> Result<()> {
+        instructions::adapter_admin::remove_adapter(ctx, adapter_id)
+    }
+
+    /// Set curator and allocator roles.
+    pub fn set_roles(ctx: Context<SetRoles>, curator: Pubkey, allocator: Pubkey) -> Result<()> {
+        instructions::adapter_admin::set_roles(ctx, curator, allocator)
+    }
+
+    /// Choose (or disable) the liquidity adapter.
+    /// Pass `0` to disable.
+    pub fn set_liquidity_adapter(ctx: Context<SetLiquidityAdapter>, adapter_id: u64) -> Result<()> {
+        instructions::adapter_admin::set_liquidity_adapter(ctx, adapter_id)
+    }
+
+    /// Set per-adapter absolute cap.
+    pub fn set_adapter_caps(
+        ctx: Context<SetAdapterCaps>,
+        adapter_id: u64,
+        max_allocation_abs: u64,
+    ) -> Result<()> {
+        instructions::adapter_admin::set_adapter_caps(ctx, adapter_id, max_allocation_abs)
+    }
+
+    /// Enable an adapter.
+    pub fn enable_adapter(ctx: Context<EnableAdapter>, adapter_id: u64) -> Result<()> {
+        instructions::adapter_admin::enable_adapter(ctx, adapter_id)
+    }
+
+    /// Disable an adapter.
+    pub fn disable_adapter(ctx: Context<DisableAdapter>, adapter_id: u64) -> Result<()> {
+        instructions::adapter_admin::disable_adapter(ctx, adapter_id)
+    }
+
+    // ============ Allocator ============
+
+    /// Allocate idle capital to an adapter position.
+    pub fn allocate(
+        ctx: Context<Allocate>,
+        adapter_id: u64,
+        amount: u64,
+        data: Vec<u8>,
+    ) -> Result<()> {
+        instructions::allocator::allocate(ctx, adapter_id, amount, data)
+    }
+
+    /// Deallocate capital from an adapter position back into the vault.
+    pub fn deallocate(
+        ctx: Context<Deallocate>,
+        adapter_id: u64,
+        amount: u64,
+        data: Vec<u8>,
+    ) -> Result<()> {
+        instructions::allocator::deallocate(ctx, adapter_id, amount, data)
     }
 
     // ============ Module Admin (feature: modules) ============

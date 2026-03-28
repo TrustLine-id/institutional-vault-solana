@@ -12,6 +12,7 @@ use crate::{
     events::Withdraw as WithdrawEvent,
     math::{convert_to_assets, Rounding},
     state::Vault,
+    trustline::{require_trustline, split_trustline_remaining_accounts},
 };
 
 #[cfg(feature = "modules")]
@@ -64,8 +65,34 @@ pub struct Redeem<'info> {
 }
 
 /// Redeem shares for assets (floor rounding - protects vault)
-pub fn handler(ctx: Context<Redeem>, shares: u64, min_assets_out: u64) -> Result<()> {
+pub fn handler<'info>(
+    ctx: Context<'_, '_, '_, 'info, Redeem<'info>>,
+    shares: u64,
+    min_assets_out: u64,
+) -> Result<()> {
     require!(shares > 0, VaultError::ZeroAmount);
+    let (_remaining_accounts, trustline_accounts) = split_trustline_remaining_accounts(
+        ctx.remaining_accounts,
+        ctx.accounts.vault.trustline_enabled,
+    )?;
+
+    let asset_mint_key = ctx.accounts.vault.asset_mint;
+    let vault_id_bytes = ctx.accounts.vault.vault_id.to_le_bytes();
+    let bump = ctx.accounts.vault.bump;
+    let signer_seeds: &[&[&[u8]]] = &[&[
+        VAULT_SEED,
+        asset_mint_key.as_ref(),
+        vault_id_bytes.as_ref(),
+        &[bump],
+    ]];
+    require_trustline(
+        &ctx.accounts.vault.to_account_info(),
+        ctx.accounts.vault.trustline_enabled,
+        ctx.accounts.vault.validation_engine,
+        &ctx.accounts.user.to_account_info(),
+        &trustline_accounts,
+        signer_seeds,
+    )?;
 
     // Check user has enough shares
     require!(
@@ -90,7 +117,7 @@ pub fn handler(ctx: Context<Redeem>, shares: u64, min_assets_out: u64) -> Result
     // ===== Module Hooks (if enabled) =====
     #[cfg(feature = "modules")]
     let net_assets = {
-        let remaining = ctx.remaining_accounts;
+        let remaining = &_remaining_accounts;
         let clock = Clock::get()?;
         let vault_key = vault.key();
         let user_key = ctx.accounts.user.key();
@@ -118,8 +145,10 @@ pub fn handler(ctx: Context<Redeem>, shares: u64, min_assets_out: u64) -> Result
     // Slippage check (on net assets after fee)
     require!(net_assets >= min_assets_out, VaultError::SlippageExceeded);
 
-    // Check vault has enough assets
-    require!(assets <= total_assets, VaultError::InsufficientAssets);
+    // Check idle liquidity only (asset_vault balance).
+    // NAV may include adapter positions, which are not withdrawable without deallocation.
+    let idle_assets = ctx.accounts.asset_vault.amount;
+    require!(net_assets <= idle_assets, VaultError::InsufficientAssets);
 
     // Burn shares from user
     token_2022::burn(
@@ -135,9 +164,6 @@ pub fn handler(ctx: Context<Redeem>, shares: u64, min_assets_out: u64) -> Result
     )?;
 
     // Transfer assets from vault to user
-    let asset_mint_key = ctx.accounts.vault.asset_mint;
-    let vault_id_bytes = ctx.accounts.vault.vault_id.to_le_bytes();
-    let bump = ctx.accounts.vault.bump;
     let signer_seeds: &[&[&[u8]]] = &[&[
         VAULT_SEED,
         asset_mint_key.as_ref(),

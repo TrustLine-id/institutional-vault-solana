@@ -16,6 +16,7 @@ use crate::{
     error::VaultError,
     events::VaultInitialized,
     state::Vault,
+    trustline::TRUSTLINE_VALIDATION_ENGINE_ID,
 };
 
 #[derive(Accounts)]
@@ -127,6 +128,9 @@ pub fn handler(
     // Set vault state
     let vault = &mut ctx.accounts.vault;
     vault.authority = ctx.accounts.authority.key();
+    // Default roles point to the authority; can be updated later via set_roles.
+    vault.curator = ctx.accounts.authority.key();
+    vault.allocator = ctx.accounts.authority.key();
     vault.asset_mint = ctx.accounts.asset_mint.key();
     vault.shares_mint = ctx.accounts.shares_mint.key();
     vault.asset_vault = ctx.accounts.asset_vault.key();
@@ -135,7 +139,13 @@ pub fn handler(
     vault.bump = vault_bump;
     vault.paused = false;
     vault.vault_id = vault_id;
-    vault._reserved = [0u8; 64];
+    vault.liquidity_adapter_id = None;
+    vault.max_adapters = 16;
+    vault.num_adapters = 0;
+    vault.last_sync_slot = 0;
+    vault.validation_engine = TRUSTLINE_VALIDATION_ENGINE_ID;
+    vault.trustline_enabled = false;
+    vault._reserved = [0u8; 31];
 
     emit!(VaultInitialized {
         vault: vault.key(),

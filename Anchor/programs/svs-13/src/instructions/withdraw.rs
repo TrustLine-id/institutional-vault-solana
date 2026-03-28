@@ -12,6 +12,7 @@ use crate::{
     events::Withdraw as WithdrawEvent,
     math::{convert_to_shares, Rounding},
     state::Vault,
+    trustline::{require_trustline, split_trustline_remaining_accounts},
 };
 
 #[cfg(feature = "modules")]
@@ -64,8 +65,34 @@ pub struct Withdraw<'info> {
 }
 
 /// Withdraw exact assets, burning required shares (ceiling rounding - protects vault)
-pub fn handler(ctx: Context<Withdraw>, assets: u64, max_shares_in: u64) -> Result<()> {
+pub fn handler<'info>(
+    ctx: Context<'_, '_, '_, 'info, Withdraw<'info>>,
+    assets: u64,
+    max_shares_in: u64,
+) -> Result<()> {
     require!(assets > 0, VaultError::ZeroAmount);
+    let (_remaining_accounts, trustline_accounts) = split_trustline_remaining_accounts(
+        ctx.remaining_accounts,
+        ctx.accounts.vault.trustline_enabled,
+    )?;
+
+    let asset_mint_key = ctx.accounts.vault.asset_mint;
+    let vault_id_bytes = ctx.accounts.vault.vault_id.to_le_bytes();
+    let bump = ctx.accounts.vault.bump;
+    let signer_seeds: &[&[&[u8]]] = &[&[
+        VAULT_SEED,
+        asset_mint_key.as_ref(),
+        vault_id_bytes.as_ref(),
+        &[bump],
+    ]];
+    require_trustline(
+        &ctx.accounts.vault.to_account_info(),
+        ctx.accounts.vault.trustline_enabled,
+        ctx.accounts.vault.validation_engine,
+        &ctx.accounts.user.to_account_info(),
+        &trustline_accounts,
+        signer_seeds,
+    )?;
 
     let vault = &ctx.accounts.vault;
     let total_shares = ctx.accounts.shares_mint.supply;
@@ -75,7 +102,7 @@ pub fn handler(ctx: Context<Withdraw>, assets: u64, max_shares_in: u64) -> Resul
     // ===== Module Hooks (if enabled) =====
     #[cfg(feature = "modules")]
     let (net_assets, _fee_assets) = {
-        let remaining = ctx.remaining_accounts;
+        let remaining = &_remaining_accounts;
         let clock = Clock::get()?;
         let vault_key = vault.key();
         let user_key = ctx.accounts.user.key();
@@ -107,6 +134,11 @@ pub fn handler(ctx: Context<Withdraw>, assets: u64, max_shares_in: u64) -> Resul
         total_assets_needed <= total_assets,
         VaultError::InsufficientAssets
     );
+
+    // User withdrawals draw from idle liquidity only (asset_vault balance).
+    // NAV may include adapter positions, but those are not withdrawable without deallocation.
+    let idle_assets = ctx.accounts.asset_vault.amount;
+    require!(net_assets <= idle_assets, VaultError::InsufficientAssets);
 
     // Calculate shares to burn based on requested assets (ceiling rounding - user burns more)
     let shares = convert_to_shares(
@@ -140,9 +172,6 @@ pub fn handler(ctx: Context<Withdraw>, assets: u64, max_shares_in: u64) -> Resul
     )?;
 
     // Transfer assets from vault to user
-    let asset_mint_key = ctx.accounts.vault.asset_mint;
-    let vault_id_bytes = ctx.accounts.vault.vault_id.to_le_bytes();
-    let bump = ctx.accounts.vault.bump;
     let signer_seeds: &[&[&[u8]]] = &[&[
         VAULT_SEED,
         asset_mint_key.as_ref(),
